@@ -1,0 +1,143 @@
+pipeline {
+    agent any
+    environment {
+        REGISTRY_NAME = "<your-docker-registry-name>"
+        SERVER_IP = "<your-server-ip>"
+        SOURCE_CODE = "<your-source-code-repo-url>"
+        SONARQUBE_SERVER_URL = 'http://${SERVER_IP}:9000'
+        SONARQUBE_PROJECT_KEY = "<your-sonarqube-project-key>"
+        SONARQUBE_TOKEN = "<your-sonarqube-token>"
+        VIRTUAL_ENV = './selenium-env'
+    }
+    options {
+        skipDefaultCheckout(true)
+        timeout(time: 1, unit: 'HOURS')
+    }
+    stages {
+        stage('Source Code Checkout') {
+            steps {
+                cleanWs()
+                script {
+                    git branch: 'main', url: "${SOURCE_CODE}"
+                }
+            }
+        }
+        stage('Static Code Analysis with SonarQube') {
+            environment {
+                sonarscanner1 = tool '<your-sonar-scanner-tool-name>'
+            }
+            steps {
+                script {
+                    withSonarQubeEnv('<your-sonarqube-server-alias>') {
+                        sh """
+                            pwd
+                            ${sonarscanner1}/bin/sonar-scanner -X \
+                            -Dsonar.host.url=${SONARQUBE_SERVER_URL} \
+                            -Dsonar.login=${SONARQUBE_TOKEN} \
+                            -Dsonar.projectKey=${SONARQUBE_PROJECT_KEY} \
+                            -Dsonar.exclusions="**/*.java" \
+                            -Dsonar.sources=. \
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Docker Image Build') {
+            steps {
+                script {
+                    sh """
+                    docker-compose build
+                    """
+                }
+            }
+        }
+        
+        stage('SecurityScan with Trivy') {
+            steps {
+                script {
+                    sh '''
+                    echo "Scanning Docker images with Trivy..."
+                    docker images --format "{{.Repository}}:{{.Tag}}" | while read image; do
+                        echo "Scanning image: $image"
+                        if [ "$image" != "sonarqube" ]; then
+                            trivy image --severity CRITICAL,HIGH $image || echo "Issues found for $image."
+                        else
+                            echo "Skipping SonarQube image."
+                        fi
+                    done
+                    echo "Scanning images is complete."
+                    '''
+                }
+            }
+        }
+        stage('Deploy Containers') {
+            steps {
+                script {
+                    sh """
+                    docker-compose up -d
+                    """
+                }
+            }
+        }
+        stage('Automated Selenium Test') {
+            steps {
+                script {
+                    withEnv(["TARGET_URL=http://${SERVER_IP}:8080"]) { 
+                        sh """
+                      python3 -m venv $VIRTUAL_ENV
+                      $VIRTUAL_ENV/bin/pip install selenium
+                      $VIRTUAL_ENV/bin/python3 <path-to-your-selenium-test-script>
+                        """
+                    }
+                }
+            }
+        }
+        stage('Push Docker Images') {
+            steps {
+                script {
+                   sh """
+                    docker images --format "{{.Repository}}:{{.Tag}}" | grep "^<your-image-prefix>" | while read image; do
+                    docker tag \$image "${REGISTRY_NAME}/\$image"
+                    echo "Pushing image: ${REGISTRY_NAME}/\$image"
+                    docker push "${REGISTRY_NAME}/\$image"
+                done
+                """
+                }
+            }
+        }
+        stage('EKS Cluster Creation with Terraform') {
+            steps {
+                script {
+                    sh """
+                    cd <path-to-your-terraform-directory>
+                    terraform init
+                    terraform apply -auto-approve
+                    aws eks --region <your-region> update-kubeconfig --name <your-cluster-name>
+                    """
+                }
+            }
+        }
+        stage('ArgoCD Setup with Ansible') {
+            steps {
+                script {
+                    sh """
+                    cd <path-to-your-ansible-directory>
+                    ansible-playbook -i <your-inventory-file> <your-ansible-playbook>
+                    """
+                }
+            }
+        }
+    }
+    post {
+        always {
+            echo 'Pipeline execution completed.'
+        }
+        success {
+            echo 'Pipeline executed successfully.'
+        }
+        failure {
+            echo 'Pipeline failed. Check logs for details.'
+        }
+    }
+}
